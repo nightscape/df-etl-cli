@@ -23,3 +23,6 @@ htmlcov/
 
 # OS / editor
 .DS_Store
+
+# hatch-vcs generated version file
+src/dfio/_version.py
