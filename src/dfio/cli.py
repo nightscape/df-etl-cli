@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import argparse
 
+from .engine import Engine
 from .etl import ETL, Sink, Source, Transformation
+from .graph import Graph
 from .registry import source_sink_schemes, transform_schemes
+from .runner import run_nodes
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -33,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sink URI (repeatable).",
     )
     parser.add_argument(
+        "--graph", metavar="PATH",
+        help="Declarative graph file (.json/.yaml). Mutually exclusive with "
+        "--source/--transform/--sink.",
+    )
+    parser.add_argument(
         "--engine", default="duckdb", help="Ibis backend (default: duckdb).",
     )
     return parser
@@ -40,6 +48,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    if args.graph:
+        assert not (args.source or args.transform or args.sink), (
+            "--graph cannot be combined with --source/--transform/--sink"
+        )
+        engine = Engine.from_config(args.engine)
+        nodes = Graph.load(args.graph).compile()
+        run_nodes(nodes, engine)
+        print("Write successful")
+        return
     etl = ETL(
         sources=[Source.parse(s) for s in args.source],
         sinks=[Sink.parse(s) for s in args.sink],

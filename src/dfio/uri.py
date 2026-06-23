@@ -23,6 +23,10 @@ class ParsedUri:
     port: int | None
     path: str
     query: str | None
+    # Inline params from a graph node (feature B): when set, ``query_params``
+    # surfaces this dict directly instead of parsing a percent-encoded query
+    # string. ``None`` means "URI-derived" — every existing caller is unaffected.
+    _params: dict[str, str] | None = None
 
     @classmethod
     def parse(cls, uri: str) -> "ParsedUri":
@@ -36,8 +40,38 @@ class ParsedUri:
             query=parts.query or None,
         )
 
+    @classmethod
+    def from_params(
+        cls,
+        scheme: str,
+        params: dict[str, str],
+        *,
+        source: str | None = None,
+        sink: str | None = None,
+    ) -> "ParsedUri":
+        """Build a ParsedUri from an inline graph-node param dict (feature B).
+
+        ``path`` is lifted to ``ParsedUri.path``; every other key becomes a query
+        param surfaced verbatim (no percent-encoding round-trip). ``source`` /
+        ``sink`` rebuild the ``source+sink+scheme`` prefix for transformer nodes.
+        """
+        full = "+".join(s for s in (source, sink, scheme) if s)
+        path = params.get("path", "")
+        rest = {k: v for k, v in params.items() if k != "path"}
+        return cls(
+            raw=f"{full}://<inline>",
+            scheme=full,
+            host=None,
+            port=None,
+            path=path,
+            query=None,
+            _params=rest,
+        )
+
     @property
     def query_params(self) -> dict[str, str]:
+        if self._params is not None:
+            return self._params
         if not self.query:
             return {}
         out: dict[str, str] = {}
