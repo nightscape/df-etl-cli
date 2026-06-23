@@ -1,12 +1,34 @@
 [project]
-name = "dfio"
+name = "df-etl-cli"
 version = "0.1.0"
 description = "URI-based, engine-agnostic ETL (Python port of dataframe-io, built on Ibis)"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Martin Mauch", email = "martin.mauch@gmail.com" },
+]
+keywords = ["etl", "ibis", "dataframe", "duckdb", "polars", "data-engineering"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Database",
+]
 dependencies = [
     "ibis-framework[duckdb]>=9.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/nightscape/df-etl-cli"
+Repository = "https://github.com/nightscape/df-etl-cli"
+Issues = "https://github.com/nightscape/df-etl-cli/issues"
 
 [project.optional-dependencies]
 polars = ["ibis-framework[polars]>=9.0"]
