@@ -7,7 +7,7 @@ from hypothesis import strategies as st
 from conftest import records, tables
 from dfio.engine import Engine
 from dfio.sources.parquet import ParquetSourceSink
-from dfio.sources.text import TextFileSourceSink
+from dfio.sources.text import TextFileSourceSink, TextUriParser
 from dfio.sources.values import ValuesUriParser
 from dfio.uri import ParsedUri
 
@@ -52,6 +52,46 @@ def test_text_csv_empty_string_reads_back_as_null(engine, tmp_path):
     )
     back = TextFileSourceSink(engine, path, delimiter=",", header=True).read()
     assert back.execute()["a"].tolist() == [None]
+
+
+def _write_csv(path) -> str:
+    p = str(path / "data.csv")
+    # blank cells in two columns; a numeric-looking and a text column
+    open(p, "w").write("a,b,c\n1,,x\n2,hi,\n")
+    return p
+
+
+@pytest.mark.parametrize("backend", ["duckdb", "polars"])
+def test_text_csv_string_faithful_infer_false_empty_string(backend, tmp_path):
+    """Feature C: infer=false&empty=string → all-string columns, '' never null,
+    identical across backends."""
+    path = _write_csv(tmp_path)
+    engine = Engine.from_config(backend)
+    uri = ParsedUri.parse(f"text://{path}?infer=false&empty=string")
+    table = TextUriParser().build(uri, engine).read()
+    engine.register("t", table)
+    out = engine.table("t").execute()
+    assert [str(t) for t in table.schema().types] == ["string", "string", "string"]
+    assert out["a"].tolist() == ["1", "2"]  # numeric-looking column stays string
+    assert out["b"].tolist() == ["", "hi"]
+    assert out["c"].tolist() == ["x", ""]
+    assert None not in out["b"].tolist() and None not in out["c"].tolist()
+
+
+def test_text_csv_default_infers_types(tmp_path):
+    """Default read (no params) infers types — column `a` becomes int, which is
+    exactly the type fidelity `infer=false` exists to suppress."""
+    path = _write_csv(tmp_path)
+    engine = Engine.from_config("duckdb")
+    table = TextUriParser().build(ParsedUri.parse(f"text://{path}"), engine).read()
+    assert str(table.schema()["a"]).startswith("int")  # inferred numeric, not string
+
+
+def test_empty_string_requires_infer_false(tmp_path):
+    path = _write_csv(tmp_path)
+    engine = Engine.from_config("duckdb")
+    with pytest.raises(AssertionError, match="empty=string requires infer=false"):
+        TextUriParser().build(ParsedUri.parse(f"text://{path}?empty=string"), engine)
 
 
 _TYPE_MAP = {"int": dt.int32, "long": dt.int64, "double": dt.float64, "string": dt.string}
