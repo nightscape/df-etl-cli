@@ -12,6 +12,7 @@ identical across every Ibis backend, which is the whole point of the port.
 from __future__ import annotations
 
 import ibis
+import pyarrow as pa
 import pyarrow.csv as pacsv
 
 from ..base import UriParser
@@ -24,17 +25,54 @@ def _delimiter_for(path: str) -> str:
 
 
 class TextFileSourceSink:
-    def __init__(self, engine: Engine, path: str, delimiter: str, header: bool):
+    def __init__(
+        self,
+        engine: Engine,
+        path: str,
+        delimiter: str,
+        header: bool,
+        infer: bool = True,
+        empty_as_string: bool = False,
+    ):
         self.engine = engine
         self.path = path
         self.delimiter = delimiter
         self.header = header
+        # String-faithful CSV (feature C): with ``infer=False`` every column is
+        # read as string; with ``empty_as_string`` blank cells stay ``""`` rather
+        # than null. The two only make sense together — blanks in an *inferred*
+        # numeric column have no string to fall back to.
+        self.infer = infer
+        self.empty_as_string = empty_as_string
 
     def read(self) -> ibis.Table:
         read_options = pacsv.ReadOptions(autogenerate_column_names=not self.header)
         parse_options = pacsv.ParseOptions(delimiter=self.delimiter)
-        arrow = pacsv.read_csv(self.path, read_options=read_options, parse_options=parse_options)
+        convert_options = self._convert_options(read_options, parse_options)
+        arrow = pacsv.read_csv(
+            self.path,
+            read_options=read_options,
+            parse_options=parse_options,
+            convert_options=convert_options,
+        )
         return ibis.memtable(arrow)
+
+    def _convert_options(self, read_options, parse_options):
+        if self.infer and not self.empty_as_string:
+            return None
+        kwargs: dict = {}
+        if not self.infer:
+            # Pre-read the names with the SAME options the real read uses, so a
+            # .tsv or headerless file gets the right column set, then pin every
+            # column to string.
+            names = pacsv.open_csv(
+                self.path, read_options=read_options, parse_options=parse_options
+            ).schema.names
+            kwargs["column_types"] = {name: pa.string() for name in names}
+        if self.empty_as_string:
+            kwargs["strings_can_be_null"] = False
+            kwargs["null_values"] = []
+        return pacsv.ConvertOptions(**kwargs)
 
     def write(self, table: ibis.Table) -> bool:
         arrow = table.to_pyarrow()
@@ -51,5 +89,21 @@ class TextUriParser(UriParser):
         return ["text"]
 
     def build(self, uri: ParsedUri, engine: Engine) -> TextFileSourceSink:
-        header = uri.query_params.get("header", "true").lower() == "true"
-        return TextFileSourceSink(engine, uri.path, _delimiter_for(uri.path), header)
+        qp = uri.query_params
+        header = qp.get("header", "true").lower() == "true"
+        infer = not (
+            qp.get("infer", "true").lower() == "false"
+            or qp.get("schema", "").lower() == "string"
+            or qp.get("all_varchar", "").lower() == "true"
+        )
+        empty_as_string = (
+            qp.get("empty", "").lower() == "string"
+            or qp.get("null_as_empty", "").lower() == "true"
+        )
+        assert not (empty_as_string and infer), (
+            f"text://{uri.path}: empty=string requires infer=false "
+            "(blank cells in an inferred non-string column have no string fallback)"
+        )
+        return TextFileSourceSink(
+            engine, uri.path, _delimiter_for(uri.path), header, infer, empty_as_string
+        )

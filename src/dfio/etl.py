@@ -5,6 +5,10 @@ table; transformations read a named input and register a named output; sinks
 read a named table and write it. Names follow the Scala convention: a missing
 source name defaults to ``"source"``, a missing sink name to ``"sink"``, and
 hyphens become underscores so names are valid SQL identifiers.
+
+The linear pipeline is *the same kernel* as the declarative graph: ``ETL.run``
+compiles its steps to ``Node`` adapters and hands them to ``run_nodes``. The
+per-step ``run`` methods are thin delegators kept for the direct-call public API.
 """
 
 from __future__ import annotations
@@ -14,7 +18,8 @@ from dataclasses import dataclass, field
 import ibis
 
 from .engine import Engine
-from .registry import as_sink, as_source, build_source_sink, build_transformer
+from .node import SinkNode, SourceNode, TransformNode
+from .runner import run_nodes
 from .uri import ParsedUri
 
 DEFAULT_SOURCE = "source"
@@ -36,9 +41,12 @@ class Source:
         _, name = uri.scheme_and_name()
         return cls(_normalize(name) if name else DEFAULT_SOURCE, uri)
 
+    def to_node(self) -> SourceNode:
+        return SourceNode(id=self.name, uri=self.uri)
+
     def run(self, engine: Engine) -> ibis.Table:
-        source = as_source(build_source_sink(self.uri, engine))
-        return engine.register(self.name, source.read())
+        self.to_node().run(engine)
+        return engine.table(self.name)
 
 
 @dataclass
@@ -52,9 +60,15 @@ class Sink:
         _, name = uri.scheme_and_name()
         return cls(_normalize(name) if name else DEFAULT_SINK, uri)
 
+    def to_node(self, index: int = 0) -> SinkNode:
+        # Sinks register nothing, so their node id only labels the step; it is
+        # kept distinct from the table they read (``inputs=[self.name]``) so it
+        # never collides with the producing node's id.
+        return SinkNode(id=f"__sink_{index}_{self.name}", inputs=[self.name], uri=self.uri)
+
     def run(self, engine: Engine) -> bool:
-        sink = as_sink(build_source_sink(self.uri, engine))
-        return sink.write(engine.table(self.name))
+        self.to_node().run(engine)
+        return True
 
 
 @dataclass
@@ -73,10 +87,12 @@ class Transformation:
             uri,
         )
 
+    def to_node(self) -> TransformNode:
+        return TransformNode(id=self.output_name, inputs=[self.input_name], uri=self.uri)
+
     def run(self, engine: Engine) -> ibis.Table:
-        transformer = build_transformer(self.uri)
-        output = transformer(engine.table(self.input_name))
-        return engine.register(self.output_name, output)
+        self.to_node().run(engine)
+        return engine.table(self.output_name)
 
 
 @dataclass
@@ -88,13 +104,13 @@ class ETL:
 
     def run(self, engine: Engine | None = None) -> None:
         engine = engine or Engine.from_config(self.backend)
-        for source in self.sources:
-            source.run(engine)
         transforms = self.transforms or [
             Transformation(DEFAULT_SOURCE, DEFAULT_SINK, ParsedUri.parse("identity:///"))
         ]
-        for transform in transforms:
-            transform.run(engine)
-        for sink in self.sinks:
-            assert sink.run(engine), f"Writing to sink {sink.name!r} failed"
+        nodes = (
+            [source.to_node() for source in self.sources]
+            + [transform.to_node() for transform in transforms]
+            + [sink.to_node(i) for i, sink in enumerate(self.sinks)]
+        )
+        run_nodes(nodes, engine)
         print("Write successful")

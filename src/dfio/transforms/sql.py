@@ -34,8 +34,9 @@ class SqlParser(TransformerParser):
     def build(self, uri: ParsedUri) -> Transformer:
         scheme = uri.scheme_source_sink()[0]
         if scheme == "sql":
-            # path already url-decoded by ParsedUri; drop the leading "/"
-            query = uri.path.lstrip("/")
+            # URI form carries url-decoded SQL in the path; inline graph nodes
+            # (feature B) carry it as a ``query`` param instead. Both land here.
+            query = uri.path.lstrip("/") or uri.query_params.get("query", "")
         else:
             query = Path(uri.path).read_text()
         assert query.strip(), (
