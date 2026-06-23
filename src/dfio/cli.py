@@ -15,7 +15,7 @@ from .engine import Engine
 from .etl import ETL, Sink, Source, Transformation
 from .graph import Graph
 from .registry import source_sink_schemes, transform_schemes
-from .runner import run_nodes
+from .runner import run_graph
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -41,6 +41,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--source/--transform/--sink.",
     )
     parser.add_argument(
+        "--bind", action="append", default=[], metavar="name=path",
+        help="Rebind a graph source's path (repeatable). Graph-only.",
+    )
+    parser.add_argument(
+        "--only", metavar="id[,id...]",
+        help="Run only these node ids, loading other inputs from the parquet "
+        "cache under --out-dir. Graph-only.",
+    )
+    parser.add_argument(
+        "--out-dir", metavar="DIR",
+        help="Cache dir for cache:true nodes and relative sink paths. Graph-only.",
+    )
+    parser.add_argument(
         "--engine", default="duckdb", help="Ibis backend (default: duckdb).",
     )
     return parser
@@ -52,11 +65,19 @@ def main(argv: list[str] | None = None) -> None:
         assert not (args.source or args.transform or args.sink), (
             "--graph cannot be combined with --source/--transform/--sink"
         )
-        engine = Engine.from_config(args.engine)
-        nodes = Graph.load(args.graph).compile()
-        run_nodes(nodes, engine)
+        graph = Graph.load(args.graph)
+        for binding in args.bind:
+            name, sep, path = binding.partition("=")
+            assert sep, f"--bind expects name=path, got {binding!r}"
+            graph.bind(name, path)
+        only = args.only.split(",") if args.only else None
+        engine = Engine.from_config(graph.engine)
+        run_graph(graph, engine, out_dir=args.out_dir, only=only)
         print("Write successful")
         return
+    assert not (args.bind or args.only or args.out_dir), (
+        "--bind/--only/--out-dir require --graph"
+    )
     etl = ETL(
         sources=[Source.parse(s) for s in args.source],
         sinks=[Sink.parse(s) for s in args.sink],

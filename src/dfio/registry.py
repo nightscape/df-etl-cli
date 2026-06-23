@@ -46,6 +46,27 @@ def transformer_parsers() -> list[TransformerParser]:
     return _builtin_transformer_parsers() + _load_plugins("dfio.transforms")
 
 
+@cache
+def node_factories() -> dict:
+    """Domain-node plugins (feature F): ``dfio.nodes`` entry points each resolve to
+    a ``(NodeContext) -> None`` callable, keyed by the node ``type`` in the graph.
+    There are no built-ins — every node kind comes from an external package."""
+    return {ep.name: ep.load() for ep in entry_points(group="dfio.nodes")}
+
+
+def node_names() -> list[str]:
+    return list(node_factories())
+
+
+def build_node(name: str):
+    factories = node_factories()
+    if name not in factories:
+        raise ValueError(
+            f"Node type {name!r} not in registered dfio.nodes: {sorted(factories)}"
+        )
+    return factories[name]
+
+
 def source_sink_schemes() -> list[str]:
     return [s for p in uri_parsers() for s in p.schemes]
 

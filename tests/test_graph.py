@@ -29,6 +29,37 @@ def _run(doc) -> Engine:
     return engine
 
 
+def test_inline_params_are_stringified():
+    """0a: native YAML scalars become the strings scheme parsers expect, so a
+    bool `infer: false` no longer crashes `.lower()`."""
+    from dfio.graph import NodeSpec
+
+    spec = NodeSpec.from_dict(
+        {"type": "text", "path": "x.csv", "infer": False, "header": True, "topn": 50},
+        id="v", is_source=True,
+    )
+    assert spec.params == {"path": "x.csv", "infer": "false", "header": "true", "topn": "50"}
+
+
+def test_graph_engine_key_and_bind():
+    """Feature: top-level engine key (default duckdb) and Graph.bind."""
+    g = Graph.from_dict({
+        "engine": "polars",
+        "data": {"src": {"type": "text", "path": "old.csv"}},
+        "pipeline": [{"id": "out", "type": "parquet", "inputs": ["src"],
+                      "path": "o.parquet", "sink": True}],
+    })
+    assert g.engine == "polars"
+    g.bind("src", "new.csv")
+    assert g.sources["src"].params["path"] == "new.csv"
+    with pytest.raises(AssertionError, match="unknown source"):
+        g.bind("nope", "x.csv")
+
+
+def test_default_engine_is_duckdb():
+    assert Graph.from_dict({"data": {}, "pipeline": []}).engine == "duckdb"
+
+
 def test_fanout_one_source_feeds_two_transforms():
     engine = _run(FANOUT)
     assert sorted(engine.table("up")["name"].execute().tolist()) == ["A", "B"]

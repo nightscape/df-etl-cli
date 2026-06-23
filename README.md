@@ -191,6 +191,32 @@ sourceName+sinkName+flatten-explode:///
 ```
 Recursively unpacks struct columns **and** explodes array columns into rows.
 
+## Declarative graphs
+
+A graph file (JSON or YAML) declares `data:` sources and a `pipeline:` of nodes
+referencing each other by `id`. A top-level `engine:` key (default `duckdb`)
+pins the backend so SQL nodes and plugin nodes share one. Run it from Python:
+
+```python
+import dfio
+
+graph = dfio.Graph.load("pipeline.yaml")
+graph.bind("vmt", "data/2026-06-23.csv")        # rebind a source path (feature I)
+engine = dfio.Engine.from_config(graph.engine)
+dfio.run_graph(graph, engine, out_dir="out", only=["coverage"], runtime=cfg)
+```
+
+or from the CLI: `dfio --graph pipeline.yaml --bind vmt=NEW.csv --only a,b --out-dir out`.
+
+- **Inline params** keep their native YAML type and are coerced to strings, so
+  `infer: false` (a bool) works without quoting.
+- **`cache: true`** on a node persists its output to `out_dir/<id>.parquet`;
+  **`--only id[,id...]`** runs just those nodes, loading any other input from that
+  cache (failing fast if absent).
+- A `text` source/`read_csv` takes `delimiter:` (alias `sep:`) to override the
+  extension default. `dfio.read_csv(path, infer=False, empty="string")` does the
+  string-faithful read outside a graph, returning a `polars.DataFrame`.
+
 ## Extending with plugins
 
 External packages register new schemes via entry points, the Python analogue of
@@ -202,7 +228,20 @@ my-scheme = "my_package:MyUriParser"
 
 [project.entry-points."dfio.transforms"]
 my-transform = "my_package:MyTransformerParser"
+
+# Domain nodes: multi-input, Polars-native, side-effecting steps that fit
+# neither a single-input transform nor a source/sink. Each resolves to a
+# `(dfio.NodeContext) -> None` callable selected by a pipeline node's `type`.
+[project.entry-points."dfio.nodes"]
+cluster = "my_package.nodes:cluster_node"
 ```
+
+A `dfio.nodes` plugin receives a `NodeContext` carrying its `id`, an ordered
+`inputs` dict of `polars.DataFrame`s (in `inputs:` order), string `params`, the
+run's `out_dir`, and an opaque `runtime` object passed to `run_graph`. It reads
+`ctx.input` (single-input sugar), may take several inputs, and either calls
+`ctx.emit(df)` to register a result for downstream nodes or writes its own files
+as a pure sink.
 
 ## Tests
 

@@ -44,6 +44,10 @@ dfio = "dfio.cli:main"
 
 [project.entry-points."dfio.transforms"]
 
+# Domain-node plugins (feature F): each entry point resolves to a
+# `(NodeContext) -> None` callable, selected by a pipeline node's `type`.
+[project.entry-points."dfio.nodes"]
+
 [build-system]
 requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"

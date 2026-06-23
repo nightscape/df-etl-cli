@@ -28,6 +28,9 @@ class Engine:
         self._catalog[name] = view
         return view
 
+    def has(self, name: str) -> bool:
+        return name in self._catalog
+
     def table(self, name: str) -> ibis.Table:
         if name not in self._catalog:
             raise KeyError(

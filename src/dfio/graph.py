@@ -34,11 +34,30 @@ from pathlib import Path
 
 import yaml
 
-from .node import Node, SinkNode, SourceNode, TransformNode
-from .registry import source_sink_schemes
+from .node import Node, PluginNode, SinkNode, SourceNode, TransformNode
+from .registry import build_node, node_names, source_sink_schemes
 from .uri import ParsedUri
 
-_RESERVED = frozenset({"id", "type", "inputs", "sink", "uri"})
+_RESERVED = frozenset({"id", "type", "inputs", "sink", "uri", "cache"})
+
+
+def _scalar_str(value):
+    """Coerce an inline YAML param value to the string a scheme parser expects.
+
+    Query-string params always arrive as strings; inline params keep their native
+    YAML type (``infer: false`` is a ``bool``, ``topn: 50`` an ``int``). Parsers
+    like ``text``'s do ``qp.get("infer").lower()``, so a non-string scalar crashes.
+    Coerce scalars to the same text the URI path would carry (``True`` -> ``"true"``,
+    ``50`` -> ``"50"``); leave structured values (dict/list) for parsers that take
+    them verbatim.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return value
+    if value is None or isinstance(value, (int, float)):
+        return json.dumps(value)
+    return value
 
 
 @dataclass
@@ -49,15 +68,16 @@ class NodeSpec:
     uri: str | None = None
     params: dict[str, str] = field(default_factory=dict)
     sink: bool = False
+    cache: bool = False
 
     @classmethod
     def from_dict(cls, entry: dict, *, id: str, is_source: bool) -> "NodeSpec":
         assert "type" in entry, f"Node {id!r} is missing required 'type'"
-        params = {k: v for k, v in entry.items() if k not in _RESERVED}
+        params = {
+            k: _scalar_str(v) for k, v in entry.items() if k not in _RESERVED
+        }
         uri = entry.get("uri")
-        has_uri = uri is not None
-        has_params = bool(params)
-        assert has_uri != has_params, (
+        assert not (uri is not None and params), (
             f"Node {id!r} must set exactly one of 'uri' or inline params; "
             f"got uri={uri!r}, params={sorted(params)}"
         )
@@ -72,6 +92,16 @@ class NodeSpec:
             uri=uri,
             params=params,
             sink=bool(entry.get("sink", False)),
+            cache=bool(entry.get("cache", False)),
+        )
+
+    def assert_single_config(self) -> None:
+        """Kernel (non-plugin) nodes need exactly one of ``uri`` / inline params."""
+        has_uri = self.uri is not None
+        has_params = bool(self.params)
+        assert has_uri != has_params, (
+            f"Node {self.id!r} must set exactly one of 'uri' or inline params; "
+            f"got uri={self.uri!r}, params={sorted(self.params)}"
         )
 
     def parsed_uri(self) -> ParsedUri:
@@ -84,6 +114,7 @@ class NodeSpec:
 class Graph:
     sources: dict[str, NodeSpec]
     pipeline: list[NodeSpec]
+    engine: str = "duckdb"
 
     @classmethod
     def load(cls, path: str) -> "Graph":
@@ -112,7 +143,16 @@ class Graph:
         for entry in pipeline:
             assert "id" in entry, f"Pipeline node is missing required 'id': {entry}"
             steps.append(NodeSpec.from_dict(entry, id=entry["id"], is_source=False))
-        return cls(sources=sources, pipeline=steps)
+        return cls(sources=sources, pipeline=steps, engine=doc.get("engine", "duckdb"))
+
+    def bind(self, name: str, path: str) -> None:
+        """Rebind a declared source's ``path`` param (feature I) without editing
+        the file. The graph file stays stable; the CLI/`coverage run vmt=NEW.csv`
+        drives a fresh input through here."""
+        assert name in self.sources, (
+            f"Cannot bind unknown source {name!r}; known: {sorted(self.sources)}"
+        )
+        self.sources[name].params["path"] = path
 
     def _all_specs(self) -> list[NodeSpec]:
         return list(self.sources.values()) + self.pipeline
@@ -133,8 +173,16 @@ class Graph:
                 )
         # (c) acyclicity (independent of declaration order)
         self._assert_acyclic(specs)
-        # (d) sink/transform input arity
+        # (d) per-kind config + arity. Plugin nodes (a registered ``dfio.nodes``
+        # type) are exempt: they take N inputs, may be pure sinks, and may carry
+        # zero params — so only kernel sources/transforms/sinks are checked here.
+        plugins = set(node_names())
+        for spec in self.sources.values():
+            spec.assert_single_config()
         for spec in self.pipeline:
+            if spec.type in plugins:
+                continue
+            spec.assert_single_config()
             if spec.sink:
                 assert len(spec.inputs) == 1, (
                     f"Sink node {spec.id!r} must have exactly one input, got {spec.inputs}"
@@ -156,10 +204,22 @@ class Graph:
     def compile(self) -> list[Node]:
         self.validate()
         scheme_is_source = set(source_sink_schemes())
+        plugins = set(node_names())
         nodes: list[Node] = []
         for spec in self.sources.values():
             nodes.append(SourceNode(id=spec.id, uri=spec.parsed_uri()))
         for spec in self.pipeline:
+            if spec.type in plugins:
+                nodes.append(
+                    PluginNode(
+                        id=spec.id,
+                        inputs=spec.inputs,
+                        fn=build_node(spec.type),
+                        params=spec.params,
+                        cache=spec.cache,
+                    )
+                )
+                continue
             uri = spec.parsed_uri()
             if spec.sink:
                 nodes.append(SinkNode(id=spec.id, inputs=spec.inputs, uri=uri))

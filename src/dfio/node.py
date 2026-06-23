@@ -14,7 +14,9 @@ lives here now, and those classes delegate to these adapters.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Callable, Protocol, runtime_checkable
+
+import ibis
 
 from .engine import Engine
 from .registry import as_sink, as_source, build_source_sink, build_transformer
@@ -79,3 +81,75 @@ class SinkNode:
         assert sink.write(engine.table(self.inputs[0])), (
             f"Writing to sink {self.id!r} failed"
         )
+
+
+def _to_polars(table: ibis.Table):
+    """Materialize an Ibis catalog table to a concrete ``polars.DataFrame`` — the
+    boundary a plugin node reads its inputs across (features F/G)."""
+    return table.to_polars()
+
+
+@dataclass
+class NodeContext:
+    """What the runner hands each ``dfio.nodes`` plugin (features F+G).
+
+    Polars-native: ``inputs`` values are ``polars.DataFrame`` and ``emit`` takes
+    one. ``inputs`` preserves ``inputs:`` declaration order so a node can unpack
+    ``raw_id, cluster_id = list(ctx.inputs)``. A plugin node may be a pure sink
+    (writes a file, never calls ``emit``).
+    """
+
+    id: str
+    inputs: dict  # ORDERED {upstream id: polars.DataFrame}, in `inputs:` order
+    params: dict[str, str]
+    out_dir: str | None
+    runtime: object
+    _emit: Callable[[str, object], None] = field(default=None, repr=False)
+
+    @property
+    def input(self):
+        """Sugar for the single-input case."""
+        assert len(self.inputs) == 1, (
+            f"Node {self.id!r}.input needs exactly one input, got {list(self.inputs)}"
+        )
+        return next(iter(self.inputs.values()))
+
+    def emit(self, df) -> None:
+        """Register ``df`` (a ``polars.DataFrame``) as this node's output under
+        ``self.id`` so downstream nodes can read it; ``cache: true`` nodes are also
+        persisted to ``out_dir/<id>.parquet`` by the runner after this returns."""
+        self._emit(self.id, df)
+
+
+@dataclass
+class PluginNode:
+    """Adapter lowering a ``dfio.nodes`` pipeline node to the ``Node`` protocol.
+
+    ``runtime``/``out_dir`` are injected by ``run_graph`` before ``run``; the
+    linear ETL front-end never produces plugin nodes. Inputs are fully
+    materialized to Polars *before* ``fn`` is invoked, so a bad upstream
+    projection fails fast (before, e.g., ``link`` downloads multi-GB models)."""
+
+    id: str
+    inputs: list[str]
+    fn: Callable[[NodeContext], None]
+    params: dict[str, str] = field(default_factory=dict)
+    cache: bool = False
+    runtime: object = None
+    out_dir: str | None = None
+
+    def run(self, engine: Engine) -> None:
+        frames = {i: _to_polars(engine.table(i)) for i in self.inputs}
+
+        def _emit(node_id: str, df) -> None:
+            engine.register(node_id, ibis.memtable(df))
+
+        ctx = NodeContext(
+            id=self.id,
+            inputs=frames,
+            params=self.params,
+            out_dir=self.out_dir,
+            runtime=self.runtime,
+            _emit=_emit,
+        )
+        self.fn(ctx)

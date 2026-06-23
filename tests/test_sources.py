@@ -94,6 +94,30 @@ def test_empty_string_requires_infer_false(tmp_path):
         TextUriParser().build(ParsedUri.parse(f"text://{path}?empty=string"), engine)
 
 
+def test_text_csv_semicolon_delimiter_param(tmp_path):
+    """0b: a .csv with ; separators reads as separate columns when delimiter=';'."""
+    path = str(tmp_path / "vmt.csv")
+    open(path, "w").write("a;b;c\n1;;x\n")
+    engine = Engine.from_config("duckdb")
+    uri = ParsedUri.parse(f"text://{path}?delimiter=;&infer=false&empty=string")
+    table = TextUriParser().build(uri, engine).read()
+    assert table.schema().names == ("a", "b", "c")
+    out = table.execute()
+    assert out["b"].tolist() == [""]  # blank stays empty string, not null
+
+
+def test_read_csv_helper_string_faithful(tmp_path):
+    """Feature C as a function: read_csv returns a polars frame, '' not null."""
+    import dfio
+
+    path = str(tmp_path / "x.csv")
+    open(path, "w").write("a;b\n1;\n")
+    df = dfio.read_csv(path, infer=False, empty="string", delimiter=";")
+    assert df.columns == ["a", "b"]
+    assert df["a"].dtype == __import__("polars").String
+    assert df["b"].to_list() == [""]
+
+
 _TYPE_MAP = {"int": dt.int32, "long": dt.int64, "double": dt.float64, "string": dt.string}
 
 

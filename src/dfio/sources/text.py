@@ -24,6 +24,26 @@ def _delimiter_for(path: str) -> str:
     return "\t" if path.rsplit(".", 1)[-1].lower() == "tsv" else ","
 
 
+def read_csv(path, *, infer=True, empty=None, delimiter=None, header=True):
+    """String-faithful CSV read outside a graph (feature C as a function).
+
+    The same pyarrow read the ``text`` source does, returned as a
+    ``polars.DataFrame``. ``empty="string"`` materializes blank cells as ``""``
+    (requires ``infer=False``); ``delimiter`` overrides the extension default.
+    One CSV codepath: a thin wrapper over ``TextFileSourceSink.read``.
+    """
+    empty_as_string = empty == "string"
+    sink = TextFileSourceSink(
+        engine=None,
+        path=path,
+        delimiter=delimiter or _delimiter_for(path),
+        header=header,
+        infer=infer,
+        empty_as_string=empty_as_string,
+    )
+    return sink.read().to_polars()
+
+
 class TextFileSourceSink:
     def __init__(
         self,
@@ -91,6 +111,9 @@ class TextUriParser(UriParser):
     def build(self, uri: ParsedUri, engine: Engine) -> TextFileSourceSink:
         qp = uri.query_params
         header = qp.get("header", "true").lower() == "true"
+        # Delimiter is extension-derived by default; ``delimiter``/``sep`` overrides
+        # it (the VMT export is a ``.csv`` with ``;`` separators).
+        delimiter = qp.get("delimiter") or qp.get("sep") or _delimiter_for(uri.path)
         infer = not (
             qp.get("infer", "true").lower() == "false"
             or qp.get("schema", "").lower() == "string"
@@ -105,5 +128,5 @@ class TextUriParser(UriParser):
             "(blank cells in an inferred non-string column have no string fallback)"
         )
         return TextFileSourceSink(
-            engine, uri.path, _delimiter_for(uri.path), header, infer, empty_as_string
+            engine, uri.path, delimiter, header, infer, empty_as_string
         )
